@@ -1,0 +1,75 @@
+server:
+  port: 8082
+  shutdown: graceful
+
+spring:
+  application:
+    name: ledger-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/payments}
+    username: ${DB_USER:ledger_svc}
+    password: ${DB_PASSWORD:ledger_pwd}
+    hikari:
+      schema: ledger             # this service only ever sees its own schema
+      maximum-pool-size: 20
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: none             # Flyway owns the schema
+  flyway:
+    schemas: ledger
+    default-schema: ledger
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9094}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+        linger.ms: 5
+    consumer:
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        spring.json.value.default.type: com.payments.common.events.PaymentEvent
+        spring.json.use.type.headers: false
+        spring.json.trusted.packages: com.payments.common.events
+    listener:
+      concurrency: 3             # one consumer thread per partition
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+payments:
+  outbox:
+    enabled: true
+    poll-interval-ms: 500
+    batch-size: 500
+  kafka:
+    retry:
+      max-retries: 3
+      initial-interval-ms: 1000
+      multiplier: 2.0
+      max-interval-ms: 10000
+
+ledger:
+  chaos:
+    # Demo only: payments from this merchant fail in the ledger consumer (retries -> DLT). Empty = off.
+    fail-merchant-id: ${LEDGER_CHAOS_FAIL_MERCHANT_ID:}

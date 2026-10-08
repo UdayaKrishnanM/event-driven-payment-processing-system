@@ -1,0 +1,89 @@
+server:
+  port: 8081
+  shutdown: graceful
+
+spring:
+  application:
+    name: payment-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/payments}
+    username: ${DB_USER:payment_svc}
+    password: ${DB_PASSWORD:payment_pwd}
+    hikari:
+      schema: payment            # this service only ever sees its own schema
+      maximum-pool-size: 20
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: none             # Flyway owns the schema
+  flyway:
+    schemas: payment
+    default-schema: payment
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  cache:
+    type: redis
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9094}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+      properties:
+        enable.idempotence: true
+        linger.ms: 5
+    consumer:
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.ErrorHandlingDeserializer
+      properties:
+        spring.deserializer.value.delegate.class: org.springframework.kafka.support.serializer.JsonDeserializer
+        spring.json.value.default.type: com.payments.common.events.PaymentEvent
+        spring.json.use.type.headers: false
+        spring.json.trusted.packages: com.payments.common.events
+    listener:
+      concurrency: 3             # one consumer thread per partition
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+
+payments:
+  outbox:
+    enabled: true
+    poll-interval-ms: 500
+    batch-size: 500
+  idempotency:
+    ttl: PT24H
+  cache:
+    status-ttl: PT5M
+  card:
+    # Keyed hash for the velocity rule. Override with CARD_FINGERPRINT_SECRET outside local dev.
+    fingerprint-secret: ${CARD_FINGERPRINT_SECRET:local-dev-only-secret-change-me}
+  authorization:
+    insufficient-funds-last4: "0002"
+    max-amount: 50000
+    velocity:
+      max-payments: 5
+      window: PT60S
+  kafka:
+    retry:
+      max-retries: 3
+      initial-interval-ms: 1000
+      multiplier: 2.0
+      max-interval-ms: 10000

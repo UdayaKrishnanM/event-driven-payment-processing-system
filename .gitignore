@@ -1,0 +1,47 @@
+# ---------- Build output (Maven) ----------
+target/
+**/target/
+!.mvn/wrapper/maven-wrapper.jar
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+release.properties
+dependency-reduced-pom.xml
+
+# ---------- IDEs ----------
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+.vscode/
+.settings/
+.project
+.classpath
+.factorypath
+bin/
+*.swp
+
+# ---------- OS files ----------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- Logs and runtime files ----------
+*.log
+logs/
+hs_err_pid*.log
+replay_pid*.log
+
+# ---------- Local secrets / environment ----------
+.env
+.env.*
+*.local.yml
+application-local.yml
+
+# ---------- Archives ----------
+*.zip
+*.tar.gz
+
+# ---------- k6 scratch output (keep load-test/results.json - it backs the resume numbers) ----------
+load-test/*.tmp.json

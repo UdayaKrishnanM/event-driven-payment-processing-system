@@ -1,0 +1,1343 @@
+{
+  "info": {
+    "_postman_id": "95050416-b3f3-41d7-9fc8-987e8caf7124",
+    "name": "Event-Driven Payment System",
+    "description": "Full functional walkthrough. Run the whole collection with the Collection Runner (in order) after `docker compose up -d --build`. Polling requests repeat themselves until the async Kafka flow finishes.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "0. Health",
+      "item": [
+        {
+          "name": "payment-service health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{paymentUrl}}/actuator/health"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('UP', () => pm.expect(pm.response.json().status).to.eql('UP'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "ledger-service health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{ledgerUrl}}/actuator/health"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('UP', () => pm.expect(pm.response.json().status).to.eql('UP'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "notification-service health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{notificationUrl}}/actuator/health"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('UP', () => pm.expect(pm.response.json().status).to.eql('UP'));"
+                ]
+              }
+            }
+          ]
+        }
+      ],
+      "description": "All three services must report UP before you run anything else."
+    },
+    {
+      "name": "1. Payment happy path + idempotency",
+      "item": [
+        {
+          "name": "Create payment (approved card)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{paymentUrl}}/api/v1/payments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantId\": \"{{merchantId}}\",\n  \"cardNumber\": \"4111111111111111\",\n  \"expiryMonth\": 12,\n  \"expiryYear\": 2030,\n  \"amount\": 2499.00,\n  \"currency\": \"INR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Returns 202 immediately. Authorization -> ledger -> settlement then happen asynchronously over Kafka."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// Fresh merchant + idempotency key for every run, so results never mix with older runs",
+                  "pm.collectionVariables.set('merchantId', 'MER-PM-' + Math.floor(Math.random() * 1e6));",
+                  "pm.collectionVariables.set('idempotencyKey', pm.variables.replaceIn('{{$guid}}'));"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 Accepted', () => pm.response.to.have.status(202));",
+                  "const json = pm.response.json();",
+                  "pm.test('status RECEIVED', () => pm.expect(json.status).to.eql('RECEIVED'));",
+                  "pm.test('card is masked', () => pm.expect(json.maskedCard).to.eql('**** 1111'));",
+                  "pm.test('full card number never returned', () => pm.expect(pm.response.text()).to.not.include('4111111111111111'));",
+                  "pm.test('Location header', () => pm.expect(pm.response.headers.get('Location')).to.include(json.paymentId));",
+                  "pm.collectionVariables.set('paymentId', json.paymentId);",
+                  "pm.collectionVariables.set('firstResponse', pm.response.text());"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Send the SAME request again (replay)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{paymentUrl}}/api/v1/payments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantId\": \"{{merchantId}}\",\n  \"cardNumber\": \"4111111111111111\",\n  \"expiryMonth\": 12,\n  \"expiryYear\": 2030,\n  \"amount\": 2499.00,\n  \"currency\": \"INR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "Same Idempotency-Key + same body: no new payment, the stored response is returned."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 Accepted', () => pm.response.to.have.status(202));",
+                  "pm.test('same paymentId', () => pm.expect(pm.response.json().paymentId).to.eql(pm.collectionVariables.get('paymentId')));",
+                  "pm.test('Idempotent-Replayed: true', () => pm.expect(pm.response.headers.get('Idempotent-Replayed')).to.eql('true'));",
+                  "pm.test('identical body', () => pm.expect(pm.response.text()).to.eql(pm.collectionVariables.get('firstResponse')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Same key, DIFFERENT body -> 422",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{idempotencyKey}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{paymentUrl}}/api/v1/payments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantId\": \"{{merchantId}}\",\n  \"cardNumber\": \"4111111111111111\",\n  \"expiryMonth\": 12,\n  \"expiryYear\": 2030,\n  \"amount\": 1.00,\n  \"currency\": \"INR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422', () => pm.response.to.have.status(422));",
+                  "pm.test('code IDEMPOTENCY_KEY_REUSED', () => pm.expect(pm.response.json().code).to.eql('IDEMPOTENCY_KEY_REUSED'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get payment (poll until SETTLED)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{paymentUrl}}/api/v1/payments/{{paymentId}}",
+            "description": "In the Collection Runner this repeats until SETTLED. Sending manually: click Send again after a second."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "setTimeout(() => {}, 1000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "const attempts = Number(pm.collectionVariables.get('pollAttempts') || 0);",
+                  "if (json.status !== 'SETTLED' && attempts < 20) {",
+                  "    pm.collectionVariables.set('pollAttempts', attempts + 1);",
+                  "    console.log('status is ' + json.status + ', polling again (' + (attempts + 1) + ')');",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "    return;",
+                  "}",
+                  "pm.collectionVariables.set('pollAttempts', 0);",
+                  "pm.test('status is SETTLED', () => pm.expect(json.status).to.eql('SETTLED'));",
+                  "",
+                  "pm.test('has 6-char auth code', () => pm.expect(json.authCode).to.match(/^[A-Z0-9]{6}$/));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "List merchant payments",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{paymentUrl}}/api/v1/payments?merchantId={{merchantId}}&page=0&size=20"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "pm.test('contains our payment', () => pm.expect(pm.response.json().content.map(p => p.paymentId)).to.include(pm.collectionVariables.get('paymentId')));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Ledger (double entry)",
+      "item": [
+        {
+          "name": "Entries for the payment (DEBIT + CREDIT)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{ledgerUrl}}/api/v1/ledger/payments/{{paymentId}}/entries"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('exactly 2 entries', () => pm.expect(json.entries.length).to.eql(2));",
+                  "pm.test('balanced', () => pm.expect(json.balanced).to.be.true);",
+                  "const accounts = json.entries.map(e => e.direction + ' ' + e.account);",
+                  "pm.test('DEBIT CUSTOMER_CLEARING', () => pm.expect(accounts).to.include('DEBIT CUSTOMER_CLEARING'));",
+                  "pm.test('CREDIT MERCHANT:<id>', () => pm.expect(accounts).to.include('CREDIT MERCHANT:' + pm.collectionVariables.get('merchantId')));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Merchant balance",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{ledgerUrl}}/api/v1/ledger/merchants/{{merchantId}}/balance"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const b = pm.response.json().balances.find(x => x.currency === 'INR');",
+                  "pm.test('balance is 2499.00', () => pm.expect(b.balance).to.eql(2499.00));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Trial balance (all debits = all credits)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{ledgerUrl}}/api/v1/ledger/trial-balance"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ledger balanced', () => pm.expect(pm.response.json().balanced).to.be.true);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. Issuer declines",
+      "item": [
+        {
+          "name": "Card ending 0002 -> INSUFFICIENT_FUNDS",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{paymentUrl}}/api/v1/payments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantId\": \"{{merchantId}}\",\n  \"cardNumber\": \"4000000000000002\",\n  \"expiryMonth\": 12,\n  \"expiryYear\": 2030,\n  \"amount\": 10.00,\n  \"currency\": \"INR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202', () => pm.response.to.have.status(202));",
+                  "pm.collectionVariables.set('declinedPaymentId', pm.response.json().paymentId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get declined payment (poll)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{paymentUrl}}/api/v1/payments/{{declinedPaymentId}}"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "setTimeout(() => {}, 1000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "const attempts = Number(pm.collectionVariables.get('pollAttempts') || 0);",
+                  "if (json.status !== 'DECLINED' && attempts < 20) {",
+                  "    pm.collectionVariables.set('pollAttempts', attempts + 1);",
+                  "    console.log('status is ' + json.status + ', polling again (' + (attempts + 1) + ')');",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "    return;",
+                  "}",
+                  "pm.collectionVariables.set('pollAttempts', 0);",
+                  "pm.test('status is DECLINED', () => pm.expect(json.status).to.eql('DECLINED'));",
+                  "pm.test('reason INSUFFICIENT_FUNDS', () => pm.expect(json.declineReason).to.eql('INSUFFICIENT_FUNDS'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Amount 60000 -> LIMIT_EXCEEDED",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{paymentUrl}}/api/v1/payments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantId\": \"{{merchantId}}\",\n  \"cardNumber\": \"4242424242424242\",\n  \"expiryMonth\": 12,\n  \"expiryYear\": 2030,\n  \"amount\": 60000.00,\n  \"currency\": \"INR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('limitPaymentId', pm.response.json().paymentId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Get over-limit payment (poll)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{paymentUrl}}/api/v1/payments/{{limitPaymentId}}"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "setTimeout(() => {}, 1000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "const attempts = Number(pm.collectionVariables.get('pollAttempts') || 0);",
+                  "if (json.status !== 'DECLINED' && attempts < 20) {",
+                  "    pm.collectionVariables.set('pollAttempts', attempts + 1);",
+                  "    console.log('status is ' + json.status + ', polling again (' + (attempts + 1) + ')');",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "    return;",
+                  "}",
+                  "pm.collectionVariables.set('pollAttempts', 0);",
+                  "pm.test('status is DECLINED', () => pm.expect(json.status).to.eql('DECLINED'));",
+                  "pm.test('reason LIMIT_EXCEEDED', () => pm.expect(json.declineReason).to.eql('LIMIT_EXCEEDED'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Velocity: same card 6 times (runner loops 6x)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{paymentUrl}}/api/v1/payments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantId\": \"{{merchantId}}-VEL\",\n  \"cardNumber\": \"5555555555554444\",\n  \"expiryMonth\": 12,\n  \"expiryYear\": 2030,\n  \"amount\": 5.00,\n  \"currency\": \"INR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "More than 5 payments with one card inside 60 s. In the runner this request repeats 6 times. Manually: Send 6 times within a minute."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (!pm.collectionVariables.get('velocityCount')) { pm.collectionVariables.set('velocityCount', 0); }"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202', () => pm.response.to.have.status(202));",
+                  "const n = Number(pm.collectionVariables.get('velocityCount')) + 1;",
+                  "pm.collectionVariables.set('velocityCount', n);",
+                  "if (n < 6) { pm.execution.setNextRequest(pm.info.requestName); } else { pm.collectionVariables.set('velocityCount', 0); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Velocity: one payment declined VELOCITY_CHECK_FAILED",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{paymentUrl}}/api/v1/payments?merchantId={{merchantId}}-VEL&size=20"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "setTimeout(() => {}, 3000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const reasons = pm.response.json().content.map(p => p.declineReason);",
+                  "pm.test('a payment was declined by the velocity rule', () => pm.expect(reasons).to.include('VELOCITY_CHECK_FAILED'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4. Validation and error handling",
+      "item": [
+        {
+          "name": "Missing Idempotency-Key -> 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{paymentUrl}}/api/v1/payments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantId\": \"{{merchantId}}\",\n  \"cardNumber\": \"4111111111111111\",\n  \"expiryMonth\": 12,\n  \"expiryYear\": 2030,\n  \"amount\": 2499.00,\n  \"currency\": \"INR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "pm.test('code MISSING_IDEMPOTENCY_KEY', () => pm.expect(pm.response.json().code).to.eql('MISSING_IDEMPOTENCY_KEY'));",
+                  "pm.test('field Idempotency-Key', () => pm.expect(pm.response.json().field).to.eql('Idempotency-Key'));",
+                  "pm.test('has timestamp', () => pm.expect(pm.response.json().timestamp).to.exist);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Idempotency-Key not a UUID -> 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "abc"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{paymentUrl}}/api/v1/payments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantId\": \"{{merchantId}}\",\n  \"cardNumber\": \"4111111111111111\",\n  \"expiryMonth\": 12,\n  \"expiryYear\": 2030,\n  \"amount\": 2499.00,\n  \"currency\": \"INR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "pm.test('code INVALID_IDEMPOTENCY_KEY', () => pm.expect(pm.response.json().code).to.eql('INVALID_IDEMPOTENCY_KEY'));",
+                  "pm.test('has timestamp', () => pm.expect(pm.response.json().timestamp).to.exist);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Card fails Luhn -> 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{paymentUrl}}/api/v1/payments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantId\": \"{{merchantId}}\",\n  \"cardNumber\": \"4111111111111112\",\n  \"expiryMonth\": 12,\n  \"expiryYear\": 2030,\n  \"amount\": 2499.00,\n  \"currency\": \"INR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "pm.test('code VALIDATION_FAILED', () => pm.expect(pm.response.json().code).to.eql('VALIDATION_FAILED'));",
+                  "pm.test('field cardNumber', () => pm.expect(pm.response.json().field).to.eql('cardNumber'));",
+                  "pm.test('has timestamp', () => pm.expect(pm.response.json().timestamp).to.exist);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Expired card -> 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{paymentUrl}}/api/v1/payments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantId\": \"{{merchantId}}\",\n  \"cardNumber\": \"4111111111111111\",\n  \"expiryMonth\": 1,\n  \"expiryYear\": 2020,\n  \"amount\": 2499.00,\n  \"currency\": \"INR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "pm.test('code VALIDATION_FAILED', () => pm.expect(pm.response.json().code).to.eql('VALIDATION_FAILED'));",
+                  "pm.test('field expiryYear', () => pm.expect(pm.response.json().field).to.eql('expiryYear'));",
+                  "pm.test('has timestamp', () => pm.expect(pm.response.json().timestamp).to.exist);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Amount 0 -> 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{paymentUrl}}/api/v1/payments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantId\": \"{{merchantId}}\",\n  \"cardNumber\": \"4111111111111111\",\n  \"expiryMonth\": 12,\n  \"expiryYear\": 2030,\n  \"amount\": 0,\n  \"currency\": \"INR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "pm.test('code VALIDATION_FAILED', () => pm.expect(pm.response.json().code).to.eql('VALIDATION_FAILED'));",
+                  "pm.test('field amount', () => pm.expect(pm.response.json().field).to.eql('amount'));",
+                  "pm.test('has timestamp', () => pm.expect(pm.response.json().timestamp).to.exist);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Amount over 100000 -> 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{paymentUrl}}/api/v1/payments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantId\": \"{{merchantId}}\",\n  \"cardNumber\": \"4111111111111111\",\n  \"expiryMonth\": 12,\n  \"expiryYear\": 2030,\n  \"amount\": 100000.01,\n  \"currency\": \"INR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "pm.test('code VALIDATION_FAILED', () => pm.expect(pm.response.json().code).to.eql('VALIDATION_FAILED'));",
+                  "pm.test('field amount', () => pm.expect(pm.response.json().field).to.eql('amount'));",
+                  "pm.test('has timestamp', () => pm.expect(pm.response.json().timestamp).to.exist);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "3 decimal places -> 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{paymentUrl}}/api/v1/payments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantId\": \"{{merchantId}}\",\n  \"cardNumber\": \"4111111111111111\",\n  \"expiryMonth\": 12,\n  \"expiryYear\": 2030,\n  \"amount\": 10.123,\n  \"currency\": \"INR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "pm.test('code VALIDATION_FAILED', () => pm.expect(pm.response.json().code).to.eql('VALIDATION_FAILED'));",
+                  "pm.test('field amount', () => pm.expect(pm.response.json().field).to.eql('amount'));",
+                  "pm.test('has timestamp', () => pm.expect(pm.response.json().timestamp).to.exist);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Currency GBP -> 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{paymentUrl}}/api/v1/payments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantId\": \"{{merchantId}}\",\n  \"cardNumber\": \"4111111111111111\",\n  \"expiryMonth\": 12,\n  \"expiryYear\": 2030,\n  \"amount\": 2499.00,\n  \"currency\": \"GBP\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "pm.test('code VALIDATION_FAILED', () => pm.expect(pm.response.json().code).to.eql('VALIDATION_FAILED'));",
+                  "pm.test('field currency', () => pm.expect(pm.response.json().field).to.eql('currency'));",
+                  "pm.test('has timestamp', () => pm.expect(pm.response.json().timestamp).to.exist);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Malformed JSON -> 400",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{paymentUrl}}/api/v1/payments",
+            "body": {
+              "mode": "raw",
+              "raw": "{ not json",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "pm.test('code MALFORMED_REQUEST', () => pm.expect(pm.response.json().code).to.eql('MALFORMED_REQUEST'));",
+                  "pm.test('has timestamp', () => pm.expect(pm.response.json().timestamp).to.exist);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unknown payment -> 404",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{paymentUrl}}/api/v1/payments/00000000-0000-0000-0000-000000000000"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));",
+                  "pm.test('PAYMENT_NOT_FOUND', () => pm.expect(pm.response.json().code).to.eql('PAYMENT_NOT_FOUND'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Payment id not a UUID -> 400",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{paymentUrl}}/api/v1/payments/hello"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "5. Notifications",
+      "item": [
+        {
+          "name": "Notifications for merchant",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{notificationUrl}}/api/v1/notifications?merchantId={{merchantId}}&size=50"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const types = pm.response.json().content.map(n => n.type);",
+                  "pm.test('authorized notification', () => pm.expect(types).to.include('PAYMENT_AUTHORIZED'));",
+                  "pm.test('settled notification', () => pm.expect(types).to.include('PAYMENT_SETTLED'));",
+                  "pm.test('declined notification', () => pm.expect(types).to.include('PAYMENT_DECLINED'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Notifications for one payment",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{notificationUrl}}/api/v1/notifications?paymentId={{paymentId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('authorized + settled', () => pm.expect(pm.response.json().totalElements).to.eql(2));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "6. Retries + dead-letter topic + replay",
+      "item": [
+        {
+          "name": "Turn chaos ON for MER-DLT-DEMO",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{ledgerUrl}}/api/v1/admin/chaos",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"failMerchantId\": \"MER-DLT-DEMO\"}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "description": "From now on the ledger consumer throws for this merchant. Watch: docker compose logs -f ledger-service"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('enabled', () => pm.expect(pm.response.json().enabled).to.be.true);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Create payment for MER-DLT-DEMO",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Idempotency-Key",
+                "value": "{{$guid}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{paymentUrl}}/api/v1/payments",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"merchantId\": \"MER-DLT-DEMO\",\n  \"cardNumber\": \"4242424242424242\",\n  \"expiryMonth\": 12,\n  \"expiryYear\": 2030,\n  \"amount\": 77.00,\n  \"currency\": \"INR\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.collectionVariables.set('dltPaymentId', pm.response.json().paymentId);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Failed events (poll until our payment is on the DLT)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{notificationUrl}}/api/v1/admin/failed-events?size=50",
+            "description": "Takes ~8 s: 1 try + 3 retries at 1 s, 2 s, 4 s, then the DLT."
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "setTimeout(() => {}, 2000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const mine = pm.response.json().content.find(f => f.key === pm.collectionVariables.get('dltPaymentId'));",
+                  "const attempts = Number(pm.collectionVariables.get('pollAttempts') || 0);",
+                  "if (!mine && attempts < 15) {",
+                  "    pm.collectionVariables.set('pollAttempts', attempts + 1);",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "    return;",
+                  "}",
+                  "pm.collectionVariables.set('pollAttempts', 0);",
+                  "pm.test('payment landed on payment.authorized.DLT', () => {",
+                  "    pm.expect(mine).to.exist;",
+                  "    pm.expect(mine.topic).to.eql('payment.authorized.DLT');",
+                  "    pm.expect(mine.consumerGroup).to.eql('ledger-service');",
+                  "});",
+                  "if (mine) { pm.collectionVariables.set('failedEventId', mine.id); }"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Payment is stuck in AUTHORIZED (not settled)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{paymentUrl}}/api/v1/payments/{{dltPaymentId}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('AUTHORIZED', () => pm.expect(pm.response.json().status).to.eql('AUTHORIZED'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Turn chaos OFF (the 'fix')",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": "{{ledgerUrl}}/api/v1/admin/chaos",
+            "body": {
+              "mode": "raw",
+              "raw": "{\"failMerchantId\": null}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('disabled', () => pm.expect(pm.response.json().enabled).to.be.false);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Replay the failed event",
+          "request": {
+            "method": "POST",
+            "header": [],
+            "url": "{{notificationUrl}}/api/v1/admin/failed-events/{{failedEventId}}/replay"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('replayed', () => pm.expect(pm.response.json().replayCount).to.be.above(0));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Payment now SETTLED (poll)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{paymentUrl}}/api/v1/payments/{{dltPaymentId}}"
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "setTimeout(() => {}, 1000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "const attempts = Number(pm.collectionVariables.get('pollAttempts') || 0);",
+                  "if (json.status !== 'SETTLED' && attempts < 20) {",
+                  "    pm.collectionVariables.set('pollAttempts', attempts + 1);",
+                  "    console.log('status is ' + json.status + ', polling again (' + (attempts + 1) + ')');",
+                  "    pm.execution.setNextRequest(pm.info.requestName);",
+                  "    return;",
+                  "}",
+                  "pm.collectionVariables.set('pollAttempts', 0);",
+                  "pm.test('status is SETTLED', () => pm.expect(json.status).to.eql('SETTLED'));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "7. Observability",
+      "item": [
+        {
+          "name": "Settlement time metric (Prometheus)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{paymentUrl}}/actuator/prometheus"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('settlement timer exported', () => pm.expect(pm.response.text()).to.include('payments_settlement_duration_seconds'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "OpenAPI docs (payment)",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": "{{paymentUrl}}/v3/api-docs"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "variable": [
+    {
+      "key": "paymentUrl",
+      "value": "http://localhost:8081"
+    },
+    {
+      "key": "ledgerUrl",
+      "value": "http://localhost:8082"
+    },
+    {
+      "key": "notificationUrl",
+      "value": "http://localhost:8083"
+    },
+    {
+      "key": "merchantId",
+      "value": "MER-1001"
+    },
+    {
+      "key": "idempotencyKey",
+      "value": ""
+    },
+    {
+      "key": "paymentId",
+      "value": ""
+    },
+    {
+      "key": "firstResponse",
+      "value": ""
+    },
+    {
+      "key": "declinedPaymentId",
+      "value": ""
+    },
+    {
+      "key": "limitPaymentId",
+      "value": ""
+    },
+    {
+      "key": "dltPaymentId",
+      "value": ""
+    },
+    {
+      "key": "failedEventId",
+      "value": ""
+    },
+    {
+      "key": "velocityCount",
+      "value": "0"
+    },
+    {
+      "key": "pollAttempts",
+      "value": "0"
+    }
+  ]
+}
