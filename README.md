@@ -2,10 +2,10 @@
 
 A production-style card payment backend: **3 Spring Boot microservices that talk only through Kafka**, with no double charges (Redis idempotency + consumer de-duplication), automatic retries with exponential backoff and dead-letter topics, a double-entry ledger in PostgreSQL, and CI quality gates.
 
-<!-- Replace YOUR_GITHUB_USER / project key after pushing to GitHub and importing into SonarCloud -->
-[![CI](https://github.com/YOUR_GITHUB_USER/event-driven-payment-system/actions/workflows/ci.yml/badge.svg)](https://github.com/YOUR_GITHUB_USER/event-driven-payment-system/actions/workflows/ci.yml)
-[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=YOUR_GITHUB_USER_event-driven-payment-system&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=YOUR_GITHUB_USER_event-driven-payment-system)
-[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=YOUR_GITHUB_USER_event-driven-payment-system&metric=coverage)](https://sonarcloud.io/summary/new_code?id=YOUR_GITHUB_USER_event-driven-payment-system)
+<!-- Replace UdayaKrishnanM / project key after pushing to GitHub and importing into SonarCloud -->
+[![CI](https://github.com/UdayaKrishnanM/event-driven-payment-system/actions/workflows/ci.yml/badge.svg)](https://github.com/UdayaKrishnanM/event-driven-payment-system/actions/workflows/ci.yml)
+[![Quality Gate](https://sonarcloud.io/api/project_badges/measure?project=UdayaKrishnanM_event-driven-payment-system&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=UdayaKrishnanM_event-driven-payment-system)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=UdayaKrishnanM_event-driven-payment-system&metric=coverage)](https://sonarcloud.io/summary/new_code?id=UdayaKrishnanM_event-driven-payment-system)
 
 > **New here? Read [`SETUP_AND_RUN_GUIDE.md`](SETUP_AND_RUN_GUIDE.md)** — step-by-step local setup, troubleshooting, full validation checklist and a walkthrough of everything happening inside the system.
 
@@ -43,7 +43,7 @@ One payment, end to end:
 Prerequisites: Docker Desktop (with ~6 GB RAM), Git. JDK 17 + Maven 3.9 only if you want to run the tests.
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USER/event-driven-payment-system.git
+git clone https://github.com/UdayaKrishnanM/event-driven-payment-system.git
 cd event-driven-payment-system
 docker compose up -d --build        # first build takes a few minutes
 docker compose ps                   # wait until the 3 services are "healthy"
